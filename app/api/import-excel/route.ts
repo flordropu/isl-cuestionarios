@@ -14,33 +14,34 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const formData = await req.formData();
-    const file = formData.get('file') as File;
-    if (!file) return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+    const body = await req.json();
+    const rows: Record<string, string>[] = body.rows || [];
+    const filename: string = body.filename || 'importacion';
 
-    // Parse CSV/Excel as text (basic CSV support)
-    const text = await file.text();
-    const lines = text.split('\n').filter(l => l.trim());
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/"/g, ''));
-    
+    if (!rows.length) {
+      return NextResponse.json({ error: 'No rows provided' }, { status: 400 });
+    }
+
     let imported = 0;
     const errors: string[] = [];
+    const cases: Record<string, string>[] = [];
 
-    for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split(',').map(v => v.trim().replace(/"/g, ''));
-      const row: Record<string, string> = {};
-      headers.forEach((h, idx) => { row[h] = values[idx] || ''; });
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      
+      // Map column names flexibly
+      const nombre = (row['nombre'] || row['Nombre'] || row['NOMBRE'] || '').toString().trim();
+      const apellido = (row['apellido'] || row['Apellido'] || row['APELLIDO'] || '').toString().trim();
+      const art = (row['art'] || row['ART'] || row['Art'] || row['aseguradora'] || 'Sin ART').toString().trim();
+      const telefono = (row['telefono'] || row['Telefono'] || row['TELEFONO'] || row['phone'] || row['tel'] || '').toString().trim();
+      const siniestro_id = (row['siniestro_id'] || row['Siniestro_id'] || row['siniestro'] || row['ID'] || `SIN-2026-${Date.now()}-${i}`).toString().trim();
 
-      // Map common column names
-      const nombre = row['nombre'] || row['name'] || row['first_name'] || '';
-      const apellido = row['apellido'] || row['lastname'] || row['last_name'] || '';
-      const art = row['art'] || row['aseguradora'] || 'Sin ART';
-      const telefono = row['telefono'] || row['phone'] || row['tel'] || '';
-      const siniestro_id = row['siniestro_id'] || row['siniestro'] || row['id'] || `SIN-2026-${Date.now()}-${i}`;
+      if (!nombre && !apellido) {
+        errors.push(`Fila ${i + 1}: sin nombre ni apellido`);
+        continue;
+      }
 
-      if (!nombre && !apellido) continue;
-
-      const { error } = await supabase.from('cases').insert({
+      const caseData = {
         nombre,
         apellido,
         art,
@@ -48,22 +49,34 @@ export async function POST(req: NextRequest) {
         siniestro_id,
         estado: 'Pendiente',
         created_at: new Date().toISOString(),
-      });
+      };
 
-      if (error) errors.push(`Fila ${i}: ${error.message}`);
-      else imported++;
+      const { error } = await supabase.from('cases').insert(caseData);
+      if (error) {
+        errors.push(`Fila ${i + 1}: ${error.message}`);
+      } else {
+        imported++;
+        cases.push(caseData);
+      }
     }
 
-    // Register import
+    // Register import in importaciones table
     await supabase.from('importaciones').insert({
-      archivo: file.name,
+      archivo: filename,
       total: imported,
       errores: errors.length,
       created_at: new Date().toISOString(),
+    }).then(() => {}).catch(() => {});
+
+    return NextResponse.json({ 
+      imported, 
+      errors, 
+      total: rows.length,
+      cases
     });
 
-    return NextResponse.json({ imported, errors, total: lines.length - 1 });
-  } catch (error) {
-    return NextResponse.json({ error: 'Error procesando el archivo' }, { status: 500 });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : 'Error desconocido';
+    return NextResponse.json({ error: 'Error procesando: ' + msg }, { status: 500 });
   }
 }
